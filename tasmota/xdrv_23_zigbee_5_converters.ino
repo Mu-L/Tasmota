@@ -127,7 +127,7 @@ enum Cx_cluster_short {
   Cx0010, Cx0011, Cx0012, Cx0013, Cx0014, Cx001A, Cx0020, Cx0100,
   Cx0101, Cx0102, Cx0201, Cx0300, Cx0400, Cx0401, Cx0402, Cx0403,
   Cx0404, Cx0405, Cx0406, Cx0500, Cx0702, Cx0B01, Cx0B04, Cx0B05,
-  CxEF00, CxFCC0, CxFCCC,
+  CxEF00, CxFC01, CxFC40, CxFCC0, CxFCCC,
 };
 
 const uint16_t Cx_cluster[] PROGMEM = {
@@ -136,7 +136,7 @@ const uint16_t Cx_cluster[] PROGMEM = {
   0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x001A, 0x0020, 0x0100,
   0x0101, 0x0102, 0x0201, 0x0300, 0x0400, 0x0401, 0x0402, 0x0403,
   0x0404, 0x0405, 0x0406, 0x0500, 0x0702, 0x0B01, 0x0B04, 0x0B05,
-  0xEF00, 0xFCC0, 0xFCCC,
+  0xEF00, 0xFC01, 0xFC40, 0xFCC0, 0xFCCC,
 };
 
 uint16_t CxToCluster(uint8_t cx) {
@@ -628,6 +628,8 @@ const Z_AttributeConverter Z_PostProcess[] PROGMEM = {
   { Ztuya1,   CxEF00, 0x0174,  Z_(TuyaAutoLock),         Cm1, 0 },
   { Zint16,   CxEF00, 0x0202,  Z_(TuyaTempTarget),       Cm_10, Z_MAPPING(Z_Data_Thermo, temperature_target) },
   { Zint16,   CxEF00, 0x0203,  Z_(LocalTemperature),     Cm_10, Z_MAPPING(Z_Data_Thermo, temperature) },  // will be overwritten by actual LocalTemperature
+  { Zuint8,   CxEF00, 0x0203,  Z_(Dimmer),               Cm1, Z_MAPPING(Z_Data_Light, dimmer) },  // will be overwritten by actual LocalTemperature
+  { Zmap8,    CxEF00, 0x0203,  Z_(Occupancy),            Cm1, Z_MAPPING(Z_Data_PIR, occupancy) },  // will be overwritten by actual LocalTemperature
   { Ztuya2,   CxEF00, 0x0215,  Z_(TuyaBattery),          Cm1, 0 },   // TODO check equivalent?
   { Ztuya2,   CxEF00, 0x0266,  Z_(TuyaMinTemp),          Cm1, 0 },
   { Ztuya2,   CxEF00, 0x0267,  Z_(TuyaMaxTemp),          Cm1, 0 },
@@ -641,6 +643,14 @@ const Z_AttributeConverter Z_PostProcess[] PROGMEM = {
   { Ztuya4,   CxEF00, 0x0405,  Z_(TuyaFanMode),          Cm1, 0 },
   { Ztuya4,   CxEF00, 0x046A,  Z_(TuyaForceMode),        Cm1, 0 },
   { Ztuya4,   CxEF00, 0x046F,  Z_(TuyaWeekSelect),       Cm1, 0 },
+
+  // Legrand BTicino - Manuf code 0x1021
+  { Zdata16,  CxFC01, 0x0000,  Z_(LegrandOpt1),          Cm1, 0 },
+  { Zbool,    CxFC01, 0x0001,  Z_(LegrandOpt2),          Cm1, 0 },
+  { Zbool,    CxFC01, 0x0002,  Z_(LegrandOpt3),          Cm1, 0 },
+
+  // Legrand - Manuf code 0x1021
+  { Zenum8,   CxFC40, 0x0000,  Z_(LegrandHeatingMode),   Cm1, 0 },
 
   // Aqara Opple spacific
   { Zuint8,   CxFCC0, 0x0009,  Z_(OppleMode),            Cm1, 0 },
@@ -738,10 +748,14 @@ public:
                     _frame_control.b.frame_type, _frame_control.b.direction, _frame_control.b.disable_def_resp,
                     _manuf_code, _transact_seq, _cmd_id,
                     &_payload);
-    if (Settings.flag3.tuya_serial_mqtt_publish) {
+    if (Settings->flag3.tuya_serial_mqtt_publish) {
       MqttPublishPrefixTopicRulesProcess_P(TELE, PSTR(D_RSLT_SENSOR));
     } else {
-      AddLog_P(LOG_LEVEL_DEBUG, PSTR(D_LOG_ZIGBEE "%s"), TasmotaGlobal.mqtt_data);
+#ifdef MQTT_DATA_STRING
+      AddLog(LOG_LEVEL_DEBUG, PSTR(D_LOG_ZIGBEE "%s"), TasmotaGlobal.mqtt_data.c_str());
+#else
+      AddLog(LOG_LEVEL_DEBUG, PSTR(D_LOG_ZIGBEE "%s"), TasmotaGlobal.mqtt_data);
+#endif      
     }
   }
 
@@ -1360,7 +1374,7 @@ void ZCLFrame::computeSyntheticAttributes(Z_attribute_list& attr_list) {
       case 0x04030000:    // SeaPressure
         {
           int16_t pressure = attr.getInt();
-          int16_t pressure_sealevel = (pressure / FastPrecisePow(1.0 - ((float)Settings.altitude / 44330.0f), 5.255f)) - 21.6f;
+          int16_t pressure_sealevel = (pressure / FastPrecisePow(1.0 - ((float)Settings->altitude / 44330.0f), 5.255f)) - 21.6f;
           attr_list.addAttribute(0x0403, 0xFFF0).setInt(pressure_sealevel);
           // We create a synthetic attribute 0403/FFF0 to indicate sea level
         }
@@ -1658,7 +1672,7 @@ void ZCLFrame::parseClusterSpecificCommand(Z_attribute_list& attr_list) {
     zigbee_devices.setTimer(_srcaddr, 0 /* groupaddr */, USE_ZIGBEE_DEBOUNCE_COMMANDS, 0 /*clusterid*/, _srcendpoint, Z_CAT_DEBOUNCE_CMD, 0, &Z_ResetDebounce);
 
     convertClusterSpecific(attr_list, _cluster_id, _cmd_id, _frame_control.b.direction, _srcaddr, _srcendpoint, _payload);
-    if (!Settings.flag5.zb_disable_autoquery) {
+    if (!Settings->flag5.zb_disable_autoquery) {
     // read attributes unless disabled
       if (!_frame_control.b.direction) {    // only handle server->client (i.e. device->coordinator)
         if (_wasbroadcast) {                // only update for broadcast messages since we don't see unicast from device to device and we wouldn't know the target
@@ -1738,6 +1752,10 @@ void ZCLFrame::syntheticAqaraSensor(Z_attribute_list &attr_list, class Z_attribu
         } else if (modelId.startsWith(F("lumi.sensor_smoke"))) {   // gas leak
           if (0x64 == attrid) {
             attr_list.addAttributePMEM(PSTR("SmokeDensity")).copyVal(attr);
+          }
+        } else if (modelId.startsWith(F("lumi.sensor_wleak"))) {   // gas leak
+          if (0x64 == attrid) {
+            attr_list.addAttributePMEM(PSTR("Water")).copyVal(attr);
           }
         } else if (modelId.startsWith(F("lumi.sensor_natgas"))) {   // gas leak
           if (0x64 == attrid) {
@@ -1977,7 +1995,7 @@ void Z_postProcessAttributes(uint16_t shortaddr, uint16_t src_ep, class Z_attrib
 
   for (auto &attr : attr_list) {
     // add endpoint suffix if needed
-    if ((Settings.flag4.zb_index_ep) && (src_ep != 1) && (count_ep > 1)) {
+    if ((Settings->flag4.zb_index_ep) && (src_ep != 1) && (count_ep > 1)) {
       // we need to add suffix if the suffix is not already different from 1
       if (attr.key_suffix == 1) {
         attr.key_suffix = src_ep;
@@ -2028,7 +2046,7 @@ void Z_postProcessAttributes(uint16_t shortaddr, uint16_t src_ep, class Z_attrib
         uint8_t *attr_address = ((uint8_t*)&data) + sizeof(Z_Data) + map_offset;
         uint32_t uval32 = attr.getUInt();     // call converter to uint only once
         int32_t  ival32 = attr.getInt();     // call converter to int only once
-        // AddLog_P(LOG_LEVEL_DEBUG_MORE, PSTR(D_LOG_ZIGBEE "Mapping type=%d offset=%d zigbee_type=%02X value=%d\n"), (uint8_t) map_type, map_offset, zigbee_type, ival32);
+        // AddLog(LOG_LEVEL_DEBUG_MORE, PSTR(D_LOG_ZIGBEE "Mapping type=%d offset=%d zigbee_type=%02X value=%d\n"), (uint8_t) map_type, map_offset, zigbee_type, ival32);
         switch (ccccaaaa) {
           case 0xEF000202:
           case 0xEF000203:    // need to convert Tuya temperatures from 1/10 to 1/00 °C
@@ -2094,7 +2112,7 @@ void Z_parseAttributeKey_inner(class Z_attribute & attr, uint16_t preferred_clus
     uint16_t local_cluster_id = CxToCluster(pgm_read_byte(&converter->cluster_short));
     uint8_t  local_type_id = pgm_read_byte(&converter->type);
     int8_t   local_multiplier = CmToMultiplier(pgm_read_byte(&converter->multiplier_idx));
-    // AddLog_P(LOG_LEVEL_DEBUG, PSTR("Try cluster = 0x%04X, attr = 0x%04X, type_id = 0x%02X"), local_cluster_id, local_attr_id, local_type_id);
+    // AddLog(LOG_LEVEL_DEBUG, PSTR("Try cluster = 0x%04X, attr = 0x%04X, type_id = 0x%02X"), local_cluster_id, local_attr_id, local_type_id);
 
     if (!attr.key_is_str) {
       if ((attr.key.id.cluster == local_cluster_id) && (attr.key.id.attr_id == local_attr_id)) {
@@ -2103,7 +2121,7 @@ void Z_parseAttributeKey_inner(class Z_attribute & attr, uint16_t preferred_clus
       }
     } else if (pgm_read_word(&converter->name_offset)) {
       const char * key = attr.key.key;
-      // AddLog_P(LOG_LEVEL_DEBUG, PSTR("Comparing '%s' with '%s'"), attr_name, converter->name);
+      // AddLog(LOG_LEVEL_DEBUG, PSTR("Comparing '%s' with '%s'"), attr_name, converter->name);
       if (0 == strcasecmp_P(key, Z_strings + pgm_read_word(&converter->name_offset))) {
         if ((preferred_cluster == 0xFFFF) ||    // any cluster
             (local_cluster_id == preferred_cluster)) {
@@ -2157,7 +2175,7 @@ bool Z_parseAttributeKey(class Z_attribute & attr, uint16_t preferred_cluster) {
       attr.attr_type = type_id;
     }
   }
-  // AddLog_P(LOG_LEVEL_DEBUG, PSTR("cluster_id = 0x%04X, attr_id = 0x%04X"), cluster_id, attr_id);
+  // AddLog(LOG_LEVEL_DEBUG, PSTR("cluster_id = 0x%04X, attr_id = 0x%04X"), cluster_id, attr_id);
 
   // do we already know the type, i.e. attribute and cluster are also known
   if ((Zunk == attr.attr_type) && (preferred_cluster != 0xFFFF)) {

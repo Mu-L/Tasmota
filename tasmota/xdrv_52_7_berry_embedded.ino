@@ -22,260 +22,145 @@
 
 /*********************************************************************************************\
  * Handlers for Berry calls and async
- * 
+ *
 \*********************************************************************************************/
 
 const char berry_prog[] =
   ""
-  //"def func(x) for i:1..x print('a') end end "
-  //"def testreal() return str(1.2+1) end "
-  //"def noop() log('noop before'); yield(); log('middle after'); yield(); log('noop after'); end "
-  //"log(\"foobar\") "
+  // create a 'ntv' module to allow functions to be registered in a safe namespace
+  // "ntv = module('ntv') "
 
   // auto-import modules
   // // import alias
-  "import wire "
+#ifdef USE_ENERGY_SENSOR
+  "import energy "
+#endif
 
-  // Phase 1
-  // Prepare the super class that will be eventually in Flash
-  "class Tasmota_ntv "
-    "var _op, _operators, _rules, _timers, _cmd "
 
-    // Map all native functions to methods
-    // Again, this will be eventually pre-compiled
-    "var getfreeheap, publish, cmd, getoption, millis, timereached, yield "
-    "var respcmnd, respcmndstr, respcmnd_done, respcmnd_error, respcmnd_failed "
-    "def init_ntv() "
-      "import tasmota_ntv "
-      "self.getfreeheap = tasmota_ntv.getfreeheap "
-      "self.publish = tasmota_ntv.publish "
-      "self.cmd = tasmota_ntv.cmd "
-      "self.getoption = tasmota_ntv.getoption "
-      "self.millis = tasmota_ntv.millis "
-      "self.timereached = tasmota_ntv.timereached "
-      "self.yield = tasmota_ntv.yield "
-      "self._operators = tasmota_ntv._operators "
+    // // Force gc and return allocated memory
+    // "def gc() "
+    //   "import gc "
+    //   "gc.collect() "
+    //   "return gc.allocated() "
+    // // "end "
+    // // simple wrapper to load a file
+    // // prefixes '/' if needed, and simpler to use than `compile()`
+    // "def load(f) "
+    //   "import string "
+    //   "try "
+    //     // check that the file ends with '.be' of '.bec'
+    //     "var fl = string.split(f,'.') "
+    //     "if (size(fl) <= 1 || (fl[-1] != 'be' && fl[-1] != 'bec')) "
+    //       "raise \"file extension is not '.be' or '.bec'\" "
+    //     "end "
+    //     "var native = f[size(f)-1] == 'c' "
+    //     // add prefix if needed
+    //     "if f[0] != '/' f = '/' + f end "
+    //     // load - works the same for .be and .bec
+    //     "var c = compile(f,'file') "
+    //     // save the compiled bytecode
+    //     "if !native "
+    //       "try "
+    //         "self.save(f+'c', c) "
+    //       "except .. as e "
+    //         "self.log(string.format('BRY: could not save compiled file %s (%s)',f+'c',e)) "
+    //       "end "
+    //     "end "
+    //     // call the compiled code
+    //     "c() "
+    //     "self.log(string.format(\"BRY: sucessfully loaded '%s'\",f)) "
+    //   "except .. as e "
+    //     "raise \"io_error\",string.format(\"Could not load file '%s'\",f) "
+    //   "end "
 
-      "self.respcmnd = tasmota_ntv.respcmnd "
-      "self.respcmndstr = tasmota_ntv.respcmndstr "
-      "self.respcmnd_done = tasmota_ntv.respcmnd_done "
-      "self.respcmnd_error = tasmota_ntv.respcmnd_error "
-      "self.respcmnd_failed = tasmota_ntv.respcmnd_failed "
-    "end "
+    // "end "
 
-    "def init() "
-      "self._op = [ "
-        "['==', /s1,s2-> str(s1)  == str(s2)],"
-        "['!==',/s1,s2-> str(s1)  != str(s2)],"
-        "['=',  /f1,f2-> real(f1) == real(f2)],"
-        "['!=', /f1,f2-> real(f1) != real(f2)],"
-        "['>=', /f1,f2-> real(f1) >= real(f2)],"
-        "['<=', /f1,f2-> real(f1) <= real(f2)],"
-        "['>',  /f1,f2-> real(f1) >  real(f2)],"
-        "['<',  /f1,f2-> real(f1) <  real(f2)],"
-      "] "
-      "self._rules = {} "
-      "self._timers = [] "
-      "self._cmd = {} "
-      "self.init_ntv() "
-    "end "
-  "end "
 
-  "class Tasmota: Tasmota_ntv "
-    // add `charsinstring(s:string,c:string) -> int``
-    // looks for any char in c, and return the position of the first chat
-    // or -1 if not found
-    "def charsinstring(s,c) "
-      "for i:0..size(s)-1 "
-        "for j:0..size(c)-1 "
-          "if s[i] == c[j] return i end "
-        "end "
-      "end "
-      "return -1 "
-    "end "
-
-    // find a key in map, case insensitive, return actual key or nil if not found
-    "def findkeyi(m,keyi) "
-      "import string "
-      "var keyu = string.toupper(keyi) "
-      "if classof(m) == map "
-        "for k:m.keys() "
-          "if string.toupper(k)==keyu || keyi=='?' "
-            "return k "
-          "end "
-        "end "
-      "end "
-    "end "
-
-    // Rules
-    "def addrule(pat,f) self._rules[pat] = f end "
-
-    // # split the item when there is an operator, returns a list of (left,op,right)
-    // # ex: "Dimmer>50" -> ["Dimmer",tasmota_gt,"50"]
-    "def find_op(item) "
-      "import string "
-      "var pos = self.charsinstring(item, self._operators) "
-      "if pos>=0 "
-        "var op_split = string.split(item,pos) "
-        // #print(op_split)
-        "var op_left = op_split[0] "
-        "var op_rest = op_split[1] "
-        // # iterate through operators
-        "for op: self._op "
-          "if string.find(op_rest,op[0]) == 0 "
-            "var op_func = op[1] "
-            "var op_right = string.split(op_rest,size(op[0]))[1] "
-            "return [op_left,op_func,op_right] "
-          "end "
-        "end "
-      "end "
-      "return [item, nil, nil] "
-    "end "
-  
-    // Rules trigger if match. return true if match, false if not
-    // Note: condition is not yet managed
-    "def try_rule(ev, rule, f) "
-      "import string "
-      "var rl_list = self.find_op(rule) "
-      "var e=ev "
-      "var rl=string.split(rl_list[0],'#') "
-      "for it:rl "
-        "found=self.findkeyi(e,it) "
-        "if found == nil "
-          "return false "
-        "end "
-        "e=e[found] "
-      "end "
-      // # check if condition is true
-      "if rl_list[1] "
-        // # did we find a function
-        "if !rl_list[1](e,rl_list[2]) "
-          // # condition is not met
-          "return false "
-        "end "
-      "end "
-      "f(e,ev) "
-      "return true "
-    "end "
-
-    // Run rules, i.e. check each individual rule
-    // Returns true if at least one rule matched, false if none
-    "def exec_rules(ev_json) "
-      "import json "
-      "var ev = json.load(ev_json) "
-      "var ret = false "
-      "if ev == nil "
-        "print('BRY: ERROR, bad json: '+ev_json, 3) "
-      "else "
-        "for r: self._rules.keys() "
-          "ret = self.try_rule(ev,r,self._rules[r]) || ret "
-        "end "
-      "end "
-      "return ret "
-    "end "
-  
-    "def settimer(delay,f) self._timers.push([self.millis(delay),f]) end "
-
-    "def run_deferred() "
-      "var i=0 "
-      "while i<self._timers.size() "
-        "if self.timereached(self._timers[i][0]) "
-          "f=self._timers[i][1] "
-          "self._timers.remove(i) "
-          "f() "
-        "else "
-          "i=i+1 "
-        "end "
-      "end "
-    "end "
-
-    // Delay function, internally calls yield() every 10ms to avoid WDT
-    "def delay(ms) "
-      "var tend = self.millis(ms) "
-      "while !self.timereached(tend) "
-        "self.yield() "
-      "end "
-    "end "
-
-    // Add command to list
-    "def addcommand(c,f) "
-      "self._cmd[c]=f "
-    "end "
-
-    "def exec_cmd(cmd, idx, payload) "
-      "import json "
-      "var payload_json = json.load(payload) "
-      "var cmd_found = self.findkeyi(self._cmd, cmd) "
-      "if cmd_found != nil "
-        "return self._cmd[cmd_found](cmd_found, idx, payload, payload_json) "
-      "end "
-    "end "
-
-    // Force gc and return allocated memory
-    "def gc() "
-      "import gc "
-      "gc.collect() "
-      "return gc.allocated() "
-    "end "
-
-  "end "
+  // // Monkey patch `Driver` class - To be continued
+  // "class Driver2 : Driver "
+  //   "def add_cmd(c, f) "
+  //     "var tasmota = self.get_tasmota() "
+  //     "tasmota.add_cmd(c, / cmd, idx, payload, payload_json -> f(self, cmd, idx, payload, payload_json)) "
+  //   "end "
+  // "end "
+  // "Driver = Driver2 "
 
   // Instantiate tasmota object
   "tasmota = Tasmota() "
+  "def log(m,l) tasmota.log(m,l) end "
+  "def load(f) return tasmota.load(f) end "
 
-  // Not sure how to run call methods from C
-  "def _exec_rules(e) return tasmota.exec_rules(e) end "
-  "def _run_deferred() return tasmota.run_deferred() end "
-  "def _exec_cmd(cmd, idx, payload) return tasmota.exec_cmd(cmd, idx, payload) end "
-  "def _gc() return tasmota.gc() end "
+#ifdef USE_LVGL
+  // instanciate singleton
+  // "class lvgl : lvgl_ntv "
+  // "end "
+  // "lv = lvgl() "
+  "import lvgl as lv "
+  // 'lv_group_focus_cb', 'lv_event_cb', 'lv_signal_cb', 'lv_design_cb', 'lv_gauge_format_cb'
+  "_lvgl_cb = [ {}, {}, {}, {}, {}, {} ] "
+  "_lvgl_cb_obj = [ {}, {}, {}, {}, {}, {} ] "
+  "def _lvgl_cb_dispatch(idx, obj, v1, v2, v3, v4) "
+    // "import string print(string.format('>>> idx=%i obj=0x%08X v1=%i', idx, obj, v1)) "
+    "var func = _lvgl_cb[idx].find(obj) "
+    "var inst = _lvgl_cb_obj[idx].find(obj) "
+    // convert arguments to ctypes if needed
 
-  // simple wrapper to load a file
-  // prefixes '/' if needed, and simpler to use than `compile()`
-  "def load(f) "
-    "import string "
-    "try "
-      // check that the file ends with '.be' of '.bec'
-      "var fl = string.split(f,'.') "
-      "if (size(fl) <= 1 || (fl[-1] != 'be' && fl[-1] != 'bec')) "
-        "raise \"file extension is not '.be' or '.bec'\" "
-      "end "
-      "var native = f[size(f)-1] == 'c' "
-      // add prefix if needed
-      "if f[0] != '/' f = '/' + f end "
-      // load - works the same for .be and .bec
-      "var c = compile(f,'file') "
-      // save the compiled bytecode
-      "if !native "
-        "save(f+'c', c) "
-      "end "
-      // call the compiled code
-      "c() "
-    "except .. as e "
-      "log(string.format(\"BRY: could not load file '%s' - %s\",f,e)) "
+    // typedef void (*lv_group_focus_cb_t)(struct _lv_group_t *);
+    // typedef void (*lv_event_cb_t)(struct _lv_obj_t * obj, lv_event_t event);
+    // typedef lv_res_t (*lv_signal_cb_t)(struct _lv_obj_t * obj, lv_signal_t sign, void * param);
+    // typedef lv_design_res_t (*lv_design_cb_t)(struct _lv_obj_t * obj, const lv_area_t * clip_area, lv_design_mode_t mode);
+    // typedef void (*lv_gauge_format_cb_t)(lv_obj_t * gauge, char * buf, int bufsize, int32_t value);
+
+    "if idx == 3 "
+      // lv_signal_cb - arg2 is lv_area
+      "v1 = lv_area(v1) "
     "end "
-  "end "
-
-  // try to load "/autoexec.be"
-  // "try compile('/autoexec.be','file')() except .. log('BRY: no /autoexec.bat file') end "
-
-  // Wire
-  "wire.validread = def(addr, reg, size) "
-    "var ret = nil "
-    "for i:0..2 "
-      "wire.begintransmission(addr) "
-      "wire.write(reg) "
-      "if wire.endtransmission(false) == 0 "
-        "wire.requestfrom(addr, size) "
-        "if wire.available() == size "
-          "for j:0..size-1 "
-            "ret = ((ret != nil ? ret : 0) << 8) + wire.read() "
-          "end "
-          "return ret "
-        "end "
-      "end "
+    
+    "if func != nil "
+      "return func(inst, v1, v2, v3, v4) "
     "end "
-    "wire.endtransmission() "
+    "return nil "
   "end "
+  // array of 6 callback types, each with key (lv_obj pointer converted to int, closure)
+
+#endif // USE_LVGL
+
+  // Wire class
+  // "class Wire : Wire_ntv "
+  //   // read bytes as `bytes()` object
+  //   "def read_bytes(addr,reg,size) "
+  //     "self._begin_transmission(addr) "
+  //     "self._write(reg) "
+  //     "self._end_transmission(false) "
+  //     "self._request_from(addr,size) "
+  //     "var ret=bytes(size) "
+  //     "while (self._available()) "
+  //       "ret..self._read() "
+  //     "end "
+  //     "return ret "
+  //   "end "
+  //   // write bytes from `bytes` object
+  //   "def write_bytes(addr,reg,b) "
+  //     "self._begin_transmission(addr) "
+  //     "self._write(reg) "
+  //     "self._write(b) "
+  //     "self._end_transmission() "
+  //   "end "
+  // "end "
+
+#ifdef USE_I2C
+  "tasmota.wire1 = Wire(1) "
+  "tasmota.wire2 = Wire(2) "
+  "wire1 = tasmota.wire1 "
+  "wire2 = tasmota.wire2 "
+#endif // USE_I2C
+
+  // auto-import gpio
+  "import gpio "
+
+#ifdef USE_LIGHT
+  "import light "
+#endif // USE_LIGHT
   ;
 
 #endif  // USE_BERRY
